@@ -5,6 +5,9 @@
  */
 
 import { DEFAULT_ACCOUNT_ID, resolveTwitchAccountContext } from "./config.js";
+import { getHelixClient } from "./helix/client-registry.js";
+import { HELIX_ACTION_NAMES, helixActionHandlers } from "./helix/tool-actions.js";
+import type { HelixActionName } from "./helix/tool-actions.js";
 import { twitchOutbound } from "./outbound.js";
 import type { ChannelMessageActionAdapter, ChannelMessageActionContext } from "./types.js";
 
@@ -58,8 +61,8 @@ function readStringParam(
 }
 
 /** Supported Twitch actions */
-const TWITCH_ACTIONS = new Set(["send" as const]);
-type TwitchAction = typeof TWITCH_ACTIONS extends Set<infer U> ? U : never;
+const TWITCH_ACTIONS = new Set(["send" as const, ...HELIX_ACTION_NAMES]);
+type TwitchAction = "send" | HelixActionName;
 
 /**
  * Twitch message actions adapter.
@@ -121,6 +124,29 @@ export const twitchMessageActions: ChannelMessageActionAdapter = {
    * });
    */
   handleAction: async (ctx: ChannelMessageActionContext) => {
+    const accountId = ctx.accountId ?? DEFAULT_ACCOUNT_ID;
+
+    // Route Helix API actions
+    const helixHandler = helixActionHandlers[ctx.action as HelixActionName];
+    if (helixHandler) {
+      const client = getHelixClient(accountId);
+      if (!client) {
+        return errorResponse(
+          "Helix API client not available. Ensure api.enabled is true and the account has clientId, clientSecret, and broadcasterId configured.",
+        );
+      }
+      try {
+        const result = await helixHandler(client, ctx.params);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(result) }],
+          details: { ok: result.ok },
+        };
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        return errorResponse(errorMsg);
+      }
+    }
+
     if (ctx.action !== "send") {
       return {
         content: [{ type: "text" as const, text: "Unsupported action" }],
@@ -130,7 +156,6 @@ export const twitchMessageActions: ChannelMessageActionAdapter = {
 
     const message = readStringParam(ctx.params, "message", { required: true });
     const to = readStringParam(ctx.params, "to", { required: false });
-    const accountId = ctx.accountId ?? DEFAULT_ACCOUNT_ID;
 
     const { account, availableAccountIds } = resolveTwitchAccountContext(ctx.cfg, accountId);
     if (!account) {

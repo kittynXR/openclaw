@@ -20,6 +20,7 @@ import type { OpenClawConfig } from "../api.js";
 import { buildChannelConfigSchema } from "../api.js";
 import { twitchMessageActions } from "./actions.js";
 import { removeClientManager } from "./client-manager-registry.js";
+import { removeHelixClient, setHelixClient } from "./helix/client-registry.js";
 import { TwitchConfigSchema } from "./config-schema.js";
 import {
   DEFAULT_ACCOUNT_ID,
@@ -188,6 +189,34 @@ export const twitchPlugin: ChannelPlugin<ResolvedTwitchAccount> =
             abortSignal: ctx.abortSignal,
           });
 
+          // Start Helix API client if enabled
+          if (account.api?.enabled && account.clientId && account.clientSecret && account.broadcasterId) {
+            try {
+              const { AppTokenManager } = await import("./auth/app-token.js");
+              const { HelixApiClient } = await import("./helix/api-client.js");
+
+              const appTokenMgr = new AppTokenManager({
+                clientId: account.clientId,
+                clientSecret: account.clientSecret,
+                logger: ctx.log!,
+              });
+
+              const helixClient = new HelixApiClient({
+                clientId: account.clientId,
+                appTokenManager: appTokenMgr,
+                userAccessToken: account.accessToken,
+                broadcasterId: account.broadcasterId,
+                botUserId: account.broadcasterId,
+                logger: ctx.log!,
+              });
+
+              setHelixClient(accountId, helixClient);
+              ctx.log?.info("Helix API client initialized");
+            } catch (err) {
+              ctx.log?.error(`Helix API client init failed: ${String(err)}`);
+            }
+          }
+
           // Start EventSub conduit if enabled
           if (account.eventsub?.enabled && account.clientId && account.clientSecret) {
             try {
@@ -223,6 +252,7 @@ export const twitchPlugin: ChannelPlugin<ResolvedTwitchAccount> =
             }
           }
 
+          removeHelixClient(accountId);
           await removeClientManager(accountId);
 
           ctx.setStatus?.({
