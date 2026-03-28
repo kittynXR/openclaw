@@ -70,6 +70,23 @@ export async function startEventSub(opts: {
   // Pre-fetch a token to fail fast if credentials are bad
   await appTokenManager.getAccessToken();
 
+  // Resolve the bot's user ID from the user access token (needed for chat subscriptions).
+  // Chat EventSub conditions require the bot's user_id, not the broadcaster's.
+  let botUserId: string | undefined;
+  try {
+    const cleanToken = account.accessToken.replace(/^oauth:/, "");
+    const validateRes = await fetch("https://id.twitch.tv/oauth2/validate", {
+      headers: { Authorization: `OAuth ${cleanToken}` },
+    });
+    if (validateRes.ok) {
+      const validateData = (await validateRes.json()) as { user_id?: string; login?: string };
+      botUserId = validateData.user_id;
+      logger.info(`Resolved bot user ID: ${botUserId} (${validateData.login})`);
+    }
+  } catch (err) {
+    logger.warn(`Failed to resolve bot user ID from token: ${String(err)}`);
+  }
+
   // 2. Conduit manager
   const conduitManager = new ConduitManager({
     appTokenManager,
@@ -100,9 +117,9 @@ export async function startEventSub(opts: {
     conduitManager,
     clientId: account.clientId,
     broadcasterId: account.broadcasterId,
-    // userId is the bot's user ID — needed for chat subscriptions.
-    // If not available, chat subscriptions will use broadcaster_user_id only.
-    userId: account.broadcasterId,
+    // userId is the bot's user ID — needed for chat EventSub conditions.
+    // Resolved from the user access token; falls back to broadcasterId.
+    userId: botUserId ?? account.broadcasterId,
     logger,
   });
 
