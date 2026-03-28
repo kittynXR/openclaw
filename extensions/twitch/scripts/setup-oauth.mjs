@@ -70,9 +70,44 @@ function saveConfig(config) {
   writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
 }
 
-function openBrowser(url) {
-  const cmd = process.platform === "darwin" ? "open" 
-    : process.platform === "win32" ? "start" 
+function openBrowser(url, { incognito = false } = {}) {
+  // Try browsers in order, with incognito/private flag support
+  const platform = process.platform;
+  
+  if (incognito) {
+    // Try Chrome/Chromium first (most reliable incognito support)
+    const chromePaths = platform === "darwin" 
+      ? ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+      : ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"];
+    
+    const firefoxPaths = platform === "darwin"
+      ? ["/Applications/Firefox.app/Contents/MacOS/firefox"]
+      : ["firefox"];
+    
+    // Try Chrome --incognito
+    for (const browser of chromePaths) {
+      try {
+        exec(`"${browser}" --incognito "${url}" 2>/dev/null`, () => {});
+        console.log("   🔒 Opened incognito window (Chrome)");
+        return;
+      } catch {}
+    }
+    
+    // Try Firefox --private-window
+    for (const browser of firefoxPaths) {
+      try {
+        exec(`"${browser}" --private-window "${url}" 2>/dev/null`, () => {});
+        console.log("   🔒 Opened private window (Firefox)");
+        return;
+      } catch {}
+    }
+    
+    console.log("   ⚠️  Could not open incognito window. Opening normally.");
+    console.log("   💡 Tip: Log out of Twitch first, or use a different browser profile.\n");
+  }
+  
+  const cmd = platform === "darwin" ? "open" 
+    : platform === "win32" ? "start" 
     : "xdg-open";
   exec(`${cmd} "${url}"`, (err) => {
     if (err) {
@@ -123,7 +158,7 @@ async function getUserId(accessToken, clientId) {
 
 // ─── OAuth Flow ─────────────────────────────────────────────────────────
 
-function runOAuthFlow(clientId, scopes, label) {
+function runOAuthFlow(clientId, scopes, label, { incognito = false } = {}) {
   return new Promise((resolve, reject) => {
     const state = Math.random().toString(36).slice(2);
     
@@ -164,9 +199,9 @@ function runOAuthFlow(clientId, scopes, label) {
     server.listen(PORT, () => {
       const authUrl = `https://id.twitch.tv/oauth2/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&response_type=code&scope=${scopes.join("+")}&state=${state}&force_verify=true`;
       
-      console.log(`\n🔐 Opening browser for ${label} authorization...`);
+      console.log(`\n🔐 Opening ${incognito ? "incognito " : ""}browser for ${label} authorization...`);
       console.log(`   Log in as the ${label.toLowerCase()} account on Twitch.\n`);
-      openBrowser(authUrl);
+      openBrowser(authUrl, { incognito });
     });
     
     // Timeout after 5 minutes
@@ -263,9 +298,14 @@ async function setupAccount(config, role, scopes, clientId, clientSecret, accoun
     : accountName ? `Bot (${accountName})`
     : "Bot";
   
+  const useIncognito = role !== "broadcaster";
+  if (useIncognito) {
+    console.log("   🔒 Will open an incognito/private window so you don't need to log out.\n");
+  }
+  
   await prompt(`Press Enter to open browser for ${label} authorization...`, "");
   
-  const code = await runOAuthFlow(clientId, scopes, label);
+  const code = await runOAuthFlow(clientId, scopes, label, { incognito: useIncognito });
   
   console.log(`\n🔄 Exchanging authorization code for tokens...`);
   const tokens = await exchangeCode(code, clientId, clientSecret);
