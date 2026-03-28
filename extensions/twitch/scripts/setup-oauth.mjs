@@ -46,16 +46,13 @@ const BROADCASTER_SCOPES = [
   "channel:read:vips",
   "user:read:chat",
   "user:write:chat",
-  "chat:read",
-  "chat:write",
   "channel:moderate",
 ];
 
 const BOT_SCOPES = [
-  "chat:read",
-  "chat:write",
   "user:read:chat",
   "user:write:chat",
+  "user:bot",
   "moderator:read:chatters",
   "moderator:manage:banned_users",
   "moderator:manage:announcements",
@@ -180,35 +177,101 @@ function runOAuthFlow(clientId, scopes, label) {
   });
 }
 
+// ─── Interactive Prompts ────────────────────────────────────────────────
+
+import { createInterface } from "node:readline";
+
+function prompt(question, defaultValue) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const display = defaultValue ? `${question} [${defaultValue}]: ` : `${question}: `;
+  return new Promise((resolve) => {
+    rl.question(display, (answer) => {
+      rl.close();
+      resolve(answer.trim() || defaultValue || "");
+    });
+  });
+}
+
+async function promptSecret(question, defaultValue) {
+  // Show masked version of existing value
+  const masked = defaultValue ? `[${defaultValue.slice(0, 4)}...${defaultValue.slice(-4)}]` : "";
+  const display = masked ? `${question} ${masked} (Enter to keep): ` : `${question}: `;
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.question(display, (answer) => {
+      rl.close();
+      resolve(answer.trim() || defaultValue || "");
+    });
+  });
+}
+
 // ─── Main ───────────────────────────────────────────────────────────────
 
-async function setupAccount(config, role, scopes) {
+async function ensureAppCredentials(config) {
   const twitch = config.channels?.twitch ?? {};
-  const clientId = twitch.clientId;
-  const clientSecret = twitch.clientSecret;
+  
+  console.log("\n📋 Step 1: Twitch Application Credentials");
+  console.log("   Create an app at https://dev.twitch.tv/console if you haven't already.");
+  console.log(`   Add this OAuth Redirect URL to your app: ${REDIRECT_URI}\n`);
+  
+  const clientId = await prompt("Client ID", twitch.clientId);
+  const clientSecret = await promptSecret("Client Secret", twitch.clientSecret);
   
   if (!clientId || !clientSecret) {
-    console.error("❌ clientId and clientSecret must be set in config first.");
-    console.error("   Edit ~/.openclaw/openclaw.json → channels.twitch.clientId / clientSecret");
+    console.error("\n❌ Both Client ID and Client Secret are required.");
     process.exit(1);
   }
   
-  // Also need redirect URI registered in the Twitch app
+  // Verify credentials work
+  console.log("\n🔄 Verifying app credentials...");
+  try {
+    const res = await fetch("https://id.twitch.tv/oauth2/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: `client_id=${clientId}&client_secret=${clientSecret}&grant_type=client_credentials`,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || JSON.stringify(data));
+    console.log(`✅ App credentials valid (token expires in ${data.expires_in}s)`);
+  } catch (err) {
+    console.error(`\n❌ Invalid credentials: ${err.message}`);
+    process.exit(1);
+  }
+  
+  twitch.clientId = clientId;
+  twitch.clientSecret = clientSecret;
+  twitch.enabled = true;
+  
+  // Ensure eventsub + api blocks exist
+  twitch.eventsub = twitch.eventsub ?? { enabled: true, shardCount: 1 };
+  twitch.api = twitch.api ?? { enabled: true };
+  
+  config.channels = config.channels ?? {};
+  config.channels.twitch = twitch;
+  saveConfig(config);
+  
+  return { clientId, clientSecret };
+}
+
+async function setupAccount(config, role, scopes, clientId, clientSecret) {
+  const twitch = config.channels.twitch;
+
   console.log(`\n⚠️  Make sure ${REDIRECT_URI} is listed as an OAuth Redirect URL`);
   console.log(`   in your Twitch app at https://dev.twitch.tv/console\n`);
   
   const label = role === "broadcaster" ? "Broadcaster" : "Bot";
+  
+  await prompt(`Press Enter to open browser for ${label} authorization...`, "");
+  
   const code = await runOAuthFlow(clientId, scopes, label);
   
   console.log(`\n🔄 Exchanging authorization code for tokens...`);
   const tokens = await exchangeCode(code, clientId, clientSecret);
   
-  console.log(`✅ Token obtained!`);
-  
   // Validate and get user info
   const validation = await validateToken(tokens.access_token);
-  const user = await getUserId(tokens.access_token, clientId);
   
+  console.log(`✅ Token obtained!`);
   console.log(`   User: ${validation.login} (ID: ${validation.user_id})`);
   console.log(`   Scopes: ${validation.scopes.length}`);
   console.log(`   Expires in: ${tokens.expires_in}s`);
@@ -219,20 +282,20 @@ async function setupAccount(config, role, scopes) {
     twitch.broadcasterRefreshToken = tokens.refresh_token;
     twitch.broadcasterId = validation.user_id;
     twitch.channel = validation.login;
-    console.log(`\n📝 Updated config: broadcasterAccessToken, broadcasterRefreshToken, broadcasterId, channel`);
+    console.log(`\n📝 Saved: broadcasterAccessToken, broadcasterRefreshToken, broadcasterId="${validation.user_id}", channel="${validation.login}"`);
   } else {
     twitch.accessToken = tokens.access_token;
     twitch.refreshToken = tokens.refresh_token;
     twitch.username = validation.login;
     if (tokens.expires_in) twitch.expiresIn = tokens.expires_in;
     twitch.obtainmentTimestamp = Date.now();
-    console.log(`\n📝 Updated config: accessToken, refreshToken, username`);
+    twitch.requireMention = twitch.requireMention ?? true;
+    console.log(`\n📝 Saved: accessToken, refreshToken, username="${validation.login}"`);
   }
   
-  config.channels = config.channels ?? {};
   config.channels.twitch = twitch;
   saveConfig(config);
-  console.log(`💾 Saved to ${CONFIG_PATH}`);
+  console.log(`💾 Config saved to ${CONFIG_PATH}`);
 }
 
 async function main() {
@@ -242,28 +305,50 @@ async function main() {
     : "both";
   
   console.log("═══════════════════════════════════════════════════");
-  console.log("  🔐 Twitch OAuth Setup");
+  console.log("  🔐 Twitch OAuth Setup Wizard");
   console.log("═══════════════════════════════════════════════════");
   
-  const config = loadConfig();
+  let config = loadConfig();
   
+  // Step 1: App credentials
+  const { clientId, clientSecret } = await ensureAppCredentials(config);
+  
+  // Step 2: Broadcaster auth
   if (mode === "both" || mode === "broadcaster") {
-    await setupAccount(config, "broadcaster", BROADCASTER_SCOPES);
+    console.log("\n───────────────────────────────────────────────────");
+    console.log("  📋 Step 2: Broadcaster Authorization");
+    console.log("  Log in as your BROADCASTER account (channel owner).");
+    console.log("  This grants EventSub access to your channel events.");
+    console.log("───────────────────────────────────────────────────");
+    
+    config = loadConfig(); // reload
+    await setupAccount(config, "broadcaster", BROADCASTER_SCOPES, clientId, clientSecret);
   }
   
+  // Step 3: Bot auth
   if (mode === "both" || mode === "bot") {
-    if (mode === "both") {
-      console.log("\n───────────────────────────────────────────────────");
-      console.log("  Now let's authorize the bot account...");
-      console.log("───────────────────────────────────────────────────");
-    }
-    // Reload config in case broadcaster step modified it
-    const freshConfig = loadConfig();
-    await setupAccount(freshConfig, "bot", BOT_SCOPES);
+    console.log("\n───────────────────────────────────────────────────");
+    console.log("  📋 Step 3: Bot Account Authorization");
+    console.log("  Log in as your BOT account (the one that sends messages).");
+    console.log("  If same as broadcaster, just authorize again.");
+    console.log("───────────────────────────────────────────────────");
+    
+    config = loadConfig(); // reload
+    await setupAccount(config, "bot", BOT_SCOPES, clientId, clientSecret);
   }
+  
+  // Summary
+  config = loadConfig();
+  const tw = config.channels.twitch;
   
   console.log("\n═══════════════════════════════════════════════════");
-  console.log("  ✅ Setup complete!");
+  console.log("  ✅ Twitch Setup Complete!");
+  console.log("═══════════════════════════════════════════════════");
+  console.log(`  Channel:     ${tw.channel ?? "not set"}`);
+  console.log(`  Broadcaster: ${tw.broadcasterId ?? "not set"}`);
+  console.log(`  Bot:         ${tw.username ?? "not set"}`);
+  console.log(`  EventSub:    ${tw.eventsub?.enabled ? "enabled" : "disabled"}`);
+  console.log(`  Helix API:   ${tw.api?.enabled ? "enabled" : "disabled"}`);
   console.log("═══════════════════════════════════════════════════");
   console.log("\nRestart the gateway to apply: openclaw gateway restart");
 }
