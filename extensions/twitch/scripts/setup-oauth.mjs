@@ -7,11 +7,11 @@
  * OpenClaw config file.
  * 
  * Usage:
- *   node extensions/twitch/scripts/setup-oauth.mjs [--broadcaster] [--bot]
- * 
- * --broadcaster: Auth as the channel broadcaster (for EventSub + API)
- * --bot:         Auth as the bot account (for chat)
- * --both:        Auth both accounts sequentially (default)
+ *   node extensions/twitch/scripts/setup-oauth.mjs              # Full setup (broadcaster + default bot)
+ *   node extensions/twitch/scripts/setup-oauth.mjs --broadcaster # Auth broadcaster only
+ *   node extensions/twitch/scripts/setup-oauth.mjs --bot         # Auth default bot only
+ *   node extensions/twitch/scripts/setup-oauth.mjs --add-bot     # Add a new named bot account
+ *   node extensions/twitch/scripts/setup-oauth.mjs --add-bot mybot  # Add bot with specific account name
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
@@ -253,13 +253,15 @@ async function ensureAppCredentials(config) {
   return { clientId, clientSecret };
 }
 
-async function setupAccount(config, role, scopes, clientId, clientSecret) {
+async function setupAccount(config, role, scopes, clientId, clientSecret, accountName) {
   const twitch = config.channels.twitch;
 
   console.log(`\n⚠️  Make sure ${REDIRECT_URI} is listed as an OAuth Redirect URL`);
   console.log(`   in your Twitch app at https://dev.twitch.tv/console\n`);
   
-  const label = role === "broadcaster" ? "Broadcaster" : "Bot";
+  const label = role === "broadcaster" ? "Broadcaster" 
+    : accountName ? `Bot (${accountName})`
+    : "Bot";
   
   await prompt(`Press Enter to open browser for ${label} authorization...`, "");
   
@@ -283,7 +285,23 @@ async function setupAccount(config, role, scopes, clientId, clientSecret) {
     twitch.broadcasterId = validation.user_id;
     twitch.channel = validation.login;
     console.log(`\n📝 Saved: broadcasterAccessToken, broadcasterRefreshToken, broadcasterId="${validation.user_id}", channel="${validation.login}"`);
+  } else if (accountName) {
+    // Named bot account → goes into accounts.<name>
+    twitch.accounts = twitch.accounts ?? {};
+    twitch.accounts[accountName] = {
+      username: validation.login,
+      accessToken: tokens.access_token,
+      refreshToken: tokens.refresh_token,
+      clientId: clientId,
+      channel: twitch.channel ?? validation.login,
+      enabled: true,
+      requireMention: true,
+      expiresIn: tokens.expires_in ?? null,
+      obtainmentTimestamp: Date.now(),
+    };
+    console.log(`\n📝 Saved: accounts.${accountName} (username="${validation.login}")`);
   } else {
+    // Default bot → top-level fields
     twitch.accessToken = tokens.access_token;
     twitch.refreshToken = tokens.refresh_token;
     twitch.username = validation.login;
@@ -296,11 +314,47 @@ async function setupAccount(config, role, scopes, clientId, clientSecret) {
   config.channels.twitch = twitch;
   saveConfig(config);
   console.log(`💾 Config saved to ${CONFIG_PATH}`);
+  
+  return { login: validation.login, userId: validation.user_id, accountName };
+}
+
+function printSummary() {
+  const config = loadConfig();
+  const tw = config.channels?.twitch ?? {};
+  const accounts = tw.accounts ?? {};
+  const botNames = Object.keys(accounts);
+  
+  console.log("\n═══════════════════════════════════════════════════");
+  console.log("  ✅ Twitch Setup Complete!");
+  console.log("═══════════════════════════════════════════════════");
+  console.log(`  Channel:     ${tw.channel ?? "not set"}`);
+  console.log(`  Broadcaster: ${tw.broadcasterId ?? "not set"}`);
+  console.log(`  Default bot: ${tw.username ?? "not set"}`);
+  if (botNames.length > 0) {
+    console.log(`  Bot accounts:`);
+    for (const name of botNames) {
+      const acc = accounts[name];
+      console.log(`    ${name}: ${acc.username ?? "?"} (${acc.enabled !== false ? "enabled" : "disabled"})`);
+    }
+  }
+  console.log(`  EventSub:    ${tw.eventsub?.enabled ? "enabled" : "disabled"}`);
+  console.log(`  Helix API:   ${tw.api?.enabled ? "enabled" : "disabled"}`);
+  console.log("═══════════════════════════════════════════════════");
+  console.log("\nRestart the gateway to apply: openclaw gateway restart");
+  
+  if (botNames.length > 0) {
+    console.log("\nTo bind a bot to an agent, add to openclaw.json → bindings:");
+    for (const name of botNames) {
+      console.log(`  { "agentId": "YOUR_AGENT_ID", "match": { "channel": "twitch", "accountId": "${name}" } }`);
+    }
+  }
 }
 
 async function main() {
   const args = process.argv.slice(2);
-  const mode = args.includes("--broadcaster") ? "broadcaster"
+  const addBotIdx = args.indexOf("--add-bot");
+  const mode = addBotIdx !== -1 ? "add-bot"
+    : args.includes("--broadcaster") ? "broadcaster"
     : args.includes("--bot") ? "bot"
     : "both";
   
@@ -310,10 +364,43 @@ async function main() {
   
   let config = loadConfig();
   
-  // Step 1: App credentials
+  // Ensure app credentials exist (needed for all modes)
   const { clientId, clientSecret } = await ensureAppCredentials(config);
   
-  // Step 2: Broadcaster auth
+  if (mode === "add-bot") {
+    // ─── Add a new named bot account ──────────────────────────────
+    let accountName = args[addBotIdx + 1];
+    
+    if (!accountName || accountName.startsWith("--")) {
+      accountName = await prompt("Account name for this bot (e.g. host-bot, mod-bot)", "");
+      if (!accountName) {
+        console.error("❌ Account name is required.");
+        process.exit(1);
+      }
+    }
+    
+    // Sanitize
+    accountName = accountName.toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+    
+    console.log("\n───────────────────────────────────────────────────");
+    console.log(`  📋 Add Bot Account: ${accountName}`);
+    console.log("  Log in as the Twitch account for this bot.");
+    console.log("───────────────────────────────────────────────────");
+    
+    config = loadConfig();
+    const result = await setupAccount(config, "named-bot", BOT_SCOPES, clientId, clientSecret, accountName);
+    
+    console.log(`\n✅ Bot "${accountName}" added (Twitch user: ${result.login})`);
+    console.log(`\nTo use this bot, add a binding in openclaw.json:`);
+    console.log(`  { "agentId": "YOUR_AGENT_ID", "match": { "channel": "twitch", "accountId": "${accountName}" } }`);
+    
+    printSummary();
+    return;
+  }
+  
+  // ─── Full setup / individual modes ──────────────────────────────
+  
+  // Broadcaster auth
   if (mode === "both" || mode === "broadcaster") {
     console.log("\n───────────────────────────────────────────────────");
     console.log("  📋 Step 2: Broadcaster Authorization");
@@ -321,36 +408,23 @@ async function main() {
     console.log("  This grants EventSub access to your channel events.");
     console.log("───────────────────────────────────────────────────");
     
-    config = loadConfig(); // reload
+    config = loadConfig();
     await setupAccount(config, "broadcaster", BROADCASTER_SCOPES, clientId, clientSecret);
   }
   
-  // Step 3: Bot auth
+  // Default bot auth
   if (mode === "both" || mode === "bot") {
     console.log("\n───────────────────────────────────────────────────");
-    console.log("  📋 Step 3: Bot Account Authorization");
-    console.log("  Log in as your BOT account (the one that sends messages).");
+    console.log("  📋 Step 3: Default Bot Authorization");
+    console.log("  Log in as your main BOT account (sends messages).");
     console.log("  If same as broadcaster, just authorize again.");
     console.log("───────────────────────────────────────────────────");
     
-    config = loadConfig(); // reload
+    config = loadConfig();
     await setupAccount(config, "bot", BOT_SCOPES, clientId, clientSecret);
   }
   
-  // Summary
-  config = loadConfig();
-  const tw = config.channels.twitch;
-  
-  console.log("\n═══════════════════════════════════════════════════");
-  console.log("  ✅ Twitch Setup Complete!");
-  console.log("═══════════════════════════════════════════════════");
-  console.log(`  Channel:     ${tw.channel ?? "not set"}`);
-  console.log(`  Broadcaster: ${tw.broadcasterId ?? "not set"}`);
-  console.log(`  Bot:         ${tw.username ?? "not set"}`);
-  console.log(`  EventSub:    ${tw.eventsub?.enabled ? "enabled" : "disabled"}`);
-  console.log(`  Helix API:   ${tw.api?.enabled ? "enabled" : "disabled"}`);
-  console.log("═══════════════════════════════════════════════════");
-  console.log("\nRestart the gateway to apply: openclaw gateway restart");
+  printSummary();
 }
 
 main().catch((err) => {
