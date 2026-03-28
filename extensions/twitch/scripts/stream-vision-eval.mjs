@@ -29,7 +29,8 @@ const OLLAMA_URL = "http://localhost:11434";
 
 const VISION_PROMPT = "Describe what you see in this stream screenshot in 2-3 sentences. Include: the game/application visible, what's happening on screen, any text or UI elements, number of people/avatars visible, and the general mood/atmosphere.";
 
-const MODELS = [
+// Models rotate round-robin. Cloud models are skipped if no ANTHROPIC_API_KEY.
+const ALL_MODELS = [
   { name: "llava:13b", type: "ollama" },
   { name: "claude-sonnet-4-20250514", type: "anthropic" },
   { name: "claude-opus-4-20250514", type: "anthropic" },
@@ -187,9 +188,12 @@ async function main() {
   if (!existsSync(EVAL_DIR)) mkdirSync(EVAL_DIR, { recursive: true });
 
   const anthropicKey = getAnthropicKey();
+  const MODELS = anthropicKey
+    ? ALL_MODELS
+    : ALL_MODELS.filter(m => m.type !== "anthropic");
+  
   if (!anthropicKey) {
-    console.error("⚠️  No Anthropic API key found. Set ANTHROPIC_API_KEY env var.");
-    console.error("   Sonnet and Opus evals will be skipped.");
+    console.log("ℹ️  No Anthropic API key — running llava:13b only. Images saved for later cloud eval.");
   }
 
   const evalFile = join(EVAL_DIR, `eval-${Date.now()}.jsonl`);
