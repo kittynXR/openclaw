@@ -50,6 +50,8 @@ const BROADCASTER_SCOPES = [
 ];
 
 const BOT_SCOPES = [
+  "chat:read",
+  "chat:edit",
   "user:read:chat",
   "user:write:chat",
   "user:bot",
