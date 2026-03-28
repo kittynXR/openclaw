@@ -180,17 +180,48 @@ export const twitchPlugin: ChannelPlugin<ResolvedTwitchAccount> =
 
           // Lazy import: the monitor pulls the reply pipeline; avoid ESM init cycles.
           const { monitorTwitchProvider } = await import("./monitor.js");
-          await monitorTwitchProvider({
+          const monitorResult = await monitorTwitchProvider({
             account,
             accountId,
             config: ctx.cfg,
             runtime: ctx.runtime,
             abortSignal: ctx.abortSignal,
           });
+
+          // Start EventSub conduit if enabled
+          if (account.eventsub?.enabled && account.clientId && account.clientSecret) {
+            try {
+              const { startEventSub } = await import("./eventsub/lifecycle.js");
+              const eventsubResult = await startEventSub({
+                account,
+                accountId,
+                dispatcher: monitorResult.eventDispatcher,
+                logger: ctx.log!,
+              });
+
+              // Store cleanup function for stopAccount
+              (ctx as Record<string, unknown>).__eventsubCleanup = eventsubResult.stop;
+            } catch (err) {
+              ctx.log?.error(`EventSub startup failed: ${String(err)}`);
+              // IRC continues as primary — EventSub is additive
+            }
+          }
         },
         stopAccount: async (ctx): Promise<void> => {
           const account = ctx.account;
           const accountId = ctx.accountId;
+
+          // Stop EventSub if running
+          const cleanup = (ctx as Record<string, unknown>).__eventsubCleanup as
+            | (() => Promise<void>)
+            | undefined;
+          if (cleanup) {
+            try {
+              await cleanup();
+            } catch (err) {
+              ctx.log?.error(`EventSub cleanup failed: ${String(err)}`);
+            }
+          }
 
           await removeClientManager(accountId);
 

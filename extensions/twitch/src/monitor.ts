@@ -9,6 +9,8 @@ import type { ReplyPayload, OpenClawConfig } from "../api.js";
 import { createChannelReplyPipeline } from "../api.js";
 import { checkTwitchAccessControl } from "./access-control.js";
 import { getOrCreateClientManager } from "./client-manager-registry.js";
+import { EventDispatcher } from "./eventsub/event-dispatcher.js";
+import type { ChatMessageEvent } from "./eventsub/types.js";
 import { getTwitchRuntime } from "./runtime.js";
 import type { TwitchAccountConfig, TwitchChatMessage } from "./types.js";
 import { stripMarkdownForTwitch } from "./utils/markdown.js";
@@ -29,6 +31,8 @@ export type TwitchMonitorOptions = {
 
 export type TwitchMonitorResult = {
   stop: () => void;
+  /** Event dispatcher for EventSub — created here so the monitor can subscribe before lifecycle starts. */
+  eventDispatcher: EventDispatcher;
 };
 
 type TwitchCoreRuntime = ReturnType<typeof getTwitchRuntime>;
@@ -185,9 +189,37 @@ async function deliverTwitchReply(params: {
 }
 
 /**
+ * Convert an EventSub ChatMessageEvent to the internal TwitchChatMessage format.
+ *
+ * This bridges EventSub's JSON payloads into the same shape used by the IRC
+ * message pipeline, so `processTwitchMessage` works for both transports.
+ */
+function eventSubChatToTwitchMessage(event: ChatMessageEvent): TwitchChatMessage {
+  const badges = event.badges ?? [];
+  const hasBadge = (setId: string) => badges.some((b) => b.set_id === setId);
+
+  return {
+    username: event.chatter_user_login,
+    userId: event.chatter_user_id,
+    message: event.message.text,
+    channel: event.broadcaster_user_login,
+    displayName: event.chatter_user_name,
+    id: event.message_id,
+    timestamp: new Date(),
+    isMod: hasBadge("moderator"),
+    isOwner: event.chatter_user_id === event.broadcaster_user_id,
+    isVip: hasBadge("vip"),
+    isSub: hasBadge("subscriber"),
+    chatType: "group",
+  };
+}
+
+/**
  * Main monitor provider for Twitch.
  *
  * Sets up message handlers and processes incoming messages.
+ * Creates an EventDispatcher that the plugin gateway passes to the EventSub
+ * lifecycle so chat.message events flow through the same pipeline as IRC.
  */
 export async function monitorTwitchProvider(
   options: TwitchMonitorOptions,
@@ -225,6 +257,9 @@ export async function monitorTwitchProvider(
     throw error;
   }
 
+  // Set of message IDs seen via EventSub — used to deduplicate when IRC is also active
+  const seenEventSubMessageIds = new Set<string>();
+
   const unregisterHandler = clientManager.onMessage(account, (message) => {
     if (stopped) {
       return;
@@ -234,6 +269,12 @@ export async function monitorTwitchProvider(
     const botUsername = account.username.toLowerCase();
     if (message.username.toLowerCase() === botUsername) {
       return; // Ignore own messages
+    }
+
+    // Deduplicate: skip if this message was already processed via EventSub
+    if (message.id && seenEventSubMessageIds.has(message.id)) {
+      seenEventSubMessageIds.delete(message.id);
+      return;
     }
 
     const access = checkTwitchAccessControl({
@@ -262,12 +303,56 @@ export async function monitorTwitchProvider(
     });
   });
 
+  // Create EventDispatcher for EventSub integration.
+  // The plugin gateway passes this to startEventSub() so shard notifications
+  // are routed here. We subscribe to channel.chat.message so EventSub chat
+  // flows through the same processTwitchMessage pipeline.
+  const eventDispatcher = new EventDispatcher(logger);
+
+  const unsubscribeEventSub = eventDispatcher.on("channel.chat.message", (event) => {
+    if (stopped) return;
+
+    const message = eventSubChatToTwitchMessage(event);
+
+    // Track message ID for dedup against IRC
+    if (message.id) {
+      seenEventSubMessageIds.add(message.id);
+      // Clean up after a short delay to prevent unbounded growth
+      setTimeout(() => seenEventSubMessageIds.delete(message.id!), 30_000);
+    }
+
+    // Access control check
+    const botUsername = account.username.toLowerCase();
+    if (message.username.toLowerCase() === botUsername) {
+      return;
+    }
+
+    const access = checkTwitchAccessControl({ message, account, botUsername });
+    if (!access.allowed) return;
+
+    statusSink?.({ lastInboundAt: Date.now() });
+
+    void processTwitchMessage({
+      message,
+      account,
+      accountId,
+      config,
+      runtime,
+      core,
+      statusSink,
+    }).catch((err) => {
+      runtime.error?.(`EventSub message processing failed: ${String(err)}`);
+    });
+  });
+
   const stop = () => {
     stopped = true;
     unregisterHandler();
+    unsubscribeEventSub();
+    seenEventSubMessageIds.clear();
   };
 
   abortSignal.addEventListener("abort", stop, { once: true });
 
-  return { stop };
+  return { stop, eventDispatcher };
 }

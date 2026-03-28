@@ -65,6 +65,16 @@ export function getAccountConfig(
         typeof twitchRaw?.obtainmentTimestamp === "number"
           ? twitchRaw.obtainmentTimestamp
           : undefined,
+      broadcasterId:
+        typeof twitchRaw?.broadcasterId === "string" ? twitchRaw.broadcasterId : undefined,
+      eventsub:
+        twitchRaw?.eventsub && typeof twitchRaw.eventsub === "object"
+          ? (twitchRaw.eventsub as TwitchAccountConfig["eventsub"])
+          : undefined,
+      api:
+        twitchRaw?.api && typeof twitchRaw.api === "object"
+          ? (twitchRaw.api as TwitchAccountConfig["api"])
+          : undefined,
     };
 
     // Merge: base-level takes precedence over accounts.default

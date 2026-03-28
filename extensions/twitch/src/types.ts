@@ -55,7 +55,7 @@ export interface TwitchAccountConfig {
   requireMention?: boolean;
   /** Outbound response prefix override for this channel/account. */
   responsePrefix?: string;
-  /** Twitch client secret (required for token refresh via RefreshingAuthProvider) */
+  /** Twitch client secret (required for token refresh and EventSub conduit) */
   clientSecret?: string;
   /** Refresh token (required for automatic token refresh) */
   refreshToken?: string;
@@ -63,6 +63,12 @@ export interface TwitchAccountConfig {
   expiresIn?: number | null;
   /** Timestamp when token was obtained (optional, for token refresh tracking) */
   obtainmentTimestamp?: number;
+  /** Broadcaster's Twitch user ID (required for EventSub subscriptions) */
+  broadcasterId?: string;
+  /** EventSub conduit configuration */
+  eventsub?: TwitchEventSubConfig;
+  /** Helix API tool actions configuration */
+  api?: TwitchApiConfig;
 }
 
 /**
@@ -112,6 +118,30 @@ export interface SendResult {
   ok: boolean;
   error?: string;
   messageId?: string;
+}
+
+/**
+ * EventSub conduit configuration
+ */
+export interface TwitchEventSubConfig {
+  /** Enable EventSub conduit transport */
+  enabled?: boolean;
+  /** Transport method — only "websocket" is supported */
+  transport?: "websocket";
+  /** Number of WebSocket shards (default: 1) */
+  shardCount?: number;
+  /** EventSub subscription types to subscribe to */
+  subscriptions?: string[];
+}
+
+/**
+ * Helix API tool actions configuration
+ */
+export interface TwitchApiConfig {
+  /** Enable Helix API tool actions */
+  enabled?: boolean;
+  /** List of enabled actions (or ["all"] for all) */
+  actions?: string[];
 }
 
 // Re-export core types for convenience

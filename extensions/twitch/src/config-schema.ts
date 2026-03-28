@@ -7,6 +7,30 @@ import { z } from "openclaw/plugin-sdk/zod";
 const TwitchRoleSchema = z.enum(["moderator", "owner", "vip", "subscriber", "all"]);
 
 /**
+ * EventSub conduit configuration schema
+ */
+const EventSubConfigSchema = z.object({
+  /** Enable EventSub conduit transport (requires clientId + clientSecret) */
+  enabled: z.boolean().optional(),
+  /** Transport method — only "websocket" is supported */
+  transport: z.literal("websocket").optional(),
+  /** Number of WebSocket shards (default: 1) */
+  shardCount: z.number().int().min(1).max(20).optional(),
+  /** EventSub subscription types to subscribe to */
+  subscriptions: z.array(z.string()).optional(),
+});
+
+/**
+ * Helix API tool actions configuration schema
+ */
+const ApiConfigSchema = z.object({
+  /** Enable Helix API tool actions */
+  enabled: z.boolean().optional(),
+  /** List of enabled actions (or ["all"] for all) */
+  actions: z.array(z.string()).optional(),
+});
+
+/**
  * Twitch account configuration schema
  */
 const TwitchAccountSchema = z.object({
@@ -28,7 +52,7 @@ const TwitchAccountSchema = z.object({
   requireMention: z.boolean().optional(),
   /** Outbound response prefix override for this channel/account. */
   responsePrefix: z.string().optional(),
-  /** Twitch client secret (required for token refresh via RefreshingAuthProvider) */
+  /** Twitch client secret (required for token refresh and EventSub conduit) */
   clientSecret: z.string().optional(),
   /** Refresh token (required for automatic token refresh) */
   refreshToken: z.string().optional(),
@@ -36,6 +60,12 @@ const TwitchAccountSchema = z.object({
   expiresIn: z.number().nullable().optional(),
   /** Timestamp when token was obtained (optional, for token refresh tracking) */
   obtainmentTimestamp: z.number().optional(),
+  /** Broadcaster's Twitch user ID (required for EventSub subscriptions) */
+  broadcasterId: z.string().optional(),
+  /** EventSub conduit configuration */
+  eventsub: EventSubConfigSchema.optional(),
+  /** Helix API tool actions configuration */
+  api: ApiConfigSchema.optional(),
 });
 
 /**
